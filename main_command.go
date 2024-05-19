@@ -1,1 +1,1 @@
-package myDocker
+package main
