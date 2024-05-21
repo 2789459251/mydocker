@@ -3,6 +3,7 @@ package subsystems
 type ResourceConfig struct {
 	//内存限制
 	MemoryLimit string
+	CpuCfsQuota int
 	//cpu时间权重
 	CpuShare string
 	//cpu核心数
