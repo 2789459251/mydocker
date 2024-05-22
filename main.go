@@ -117,10 +117,12 @@ func Run(tty bool, comArray []string, res *subsystems.ResourceConfig) {
 		log.Errorf("Run parent.Start err:%v", err)
 	}
 	// 创建cgroup manager, 并通过调用set和apply设置资源限制并使限制在容器上生效
-	cgroupManager := cgroups.NewCgroupManager("mydocker-cgroup")
-	defer cgroupManager.Destroy()
+	cgroupManager := cgroups.NewCgroupManager("mydocker2")
+
+	cgroupManager.Resource = res
 	_ = cgroupManager.Set(res)
 	_ = cgroupManager.Apply(parent.Process.Pid)
+	//defer cgroupManager.Destroy()
 
 	// 在子进程创建后才能通过pipe来发送参数
 	sendInitCommand(comArray, writePipe)

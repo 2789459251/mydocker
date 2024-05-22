@@ -6,6 +6,7 @@ import (
 )
 
 type CgroupManager struct {
+	//cgroup在hierarchy中的路径，相当于创建cgroup相对于root cgroup目录的路径
 	path     string
 	Resource *subsystems.ResourceConfig
 }
@@ -17,14 +18,20 @@ func NewCgroupManager(path string) *CgroupManager {
 // 将进程的PID加入subsystem资源限制处理链数组中
 func (cm *CgroupManager) Apply(pid int) error {
 	for _, subsystem := range subsystems.SubsystemsIns {
-		subsystem.Apply(cm.path, pid)
+		err := subsystem.Apply(cm.path, pid, cm.Resource)
+		if err != nil {
+			logrus.Errorf("apply subsystem:%s err:%s", subsystem.Name(), err)
+		}
 	}
 	return nil
 }
 
 func (cm *CgroupManager) Set(res *subsystems.ResourceConfig) error {
 	for _, subsystem := range subsystems.SubsystemsIns {
-		subsystem.Set(cm.path, res)
+		err := subsystem.Set(cm.path, res)
+		if err != nil {
+			logrus.Errorf("apply subsystem:%s err:%s", subsystem.Name(), err)
+		}
 	}
 	return nil
 }

@@ -2,7 +2,8 @@ package subsystems
 
 import (
 	"fmt"
-	"io/ioutil"
+	"github.com/pkg/errors"
+	"myDocker/constant"
 	"os"
 	"path"
 	"strconv"
@@ -11,38 +12,43 @@ import (
 type CpusetSubSystem struct {
 }
 
+func (s *CpusetSubSystem) Name() string {
+	return "cpuset"
+}
+
 func (s *CpusetSubSystem) Set(cgroupPath string, res *ResourceConfig) error {
-	if subsysCgroupPath, err := GetCgroupPath(s.Name(), cgroupPath, true); err == nil {
-		if res.CpuSet != "" {
-			if err := ioutil.WriteFile(path.Join(subsysCgroupPath, "cpuset.cpus"), []byte(res.CpuSet), 0644); err != nil {
-				return fmt.Errorf("set cgroup cpuset fail %v", err)
-			}
-		}
+	if res.CpuSet == "" {
 		return nil
-	} else {
+	}
+	subsysCgroupPath, err := getCgroupPath(s.Name(), cgroupPath, true)
+	if err != nil {
 		return err
 	}
+	if err := os.WriteFile(path.Join(subsysCgroupPath, "cpuset.cpus"), []byte(res.CpuSet), constant.Perm0644); err != nil {
+		return fmt.Errorf("set cgroup cpuset fail %v", err)
+	}
+	return nil
+}
+
+func (s *CpusetSubSystem) Apply(cgroupPath string, pid int, res *ResourceConfig) error {
+	if res.CpuSet == "" {
+		return nil
+	}
+	subsysCgroupPath, err := getCgroupPath(s.Name(), cgroupPath, false)
+	if err != nil {
+		return errors.Wrapf(err, "get cgroup %s", cgroupPath)
+
+	}
+	if err := os.WriteFile(path.Join(subsysCgroupPath, "tasks"), []byte(strconv.Itoa(pid)), constant.Perm0644); err != nil {
+		return fmt.Errorf("set cgroup proc fail %v", err)
+	}
+	return nil
 }
 
 func (s *CpusetSubSystem) Remove(cgroupPath string) error {
-	if subsysCgroupPath, err := GetCgroupPath(s.Name(), cgroupPath, false); err == nil {
-		return os.RemoveAll(subsysCgroupPath)
-	} else {
+	subsysCgroupPath, err := getCgroupPath(s.Name(), cgroupPath, false)
+	if err != nil {
 		return err
 	}
-}
-
-func (s *CpusetSubSystem) Apply(cgroupPath string, pid int) error {
-	if subsysCgroupPath, err := GetCgroupPath(s.Name(), cgroupPath, false); err == nil {
-		if err := ioutil.WriteFile(path.Join(subsysCgroupPath, "tasks"), []byte(strconv.Itoa(pid)), 0644); err != nil {
-			return fmt.Errorf("set cgroup proc fail %v", err)
-		}
-		return nil
-	} else {
-		return fmt.Errorf("get cgroup %s error: %v", cgroupPath, err)
-	}
-}
-
-func (s *CpusetSubSystem) Name() string {
-	return "cpuset"
+	return os.RemoveAll(subsysCgroupPath)
 }
