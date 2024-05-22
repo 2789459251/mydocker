@@ -3,10 +3,31 @@ package container
 import (
 	"fmt"
 	"github.com/sirupsen/logrus"
+	"math/rand"
+	"myDocker/constant"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
+	"time"
 )
+
+func setUpMount() {
+	pwd, err := os.Getwd()
+	if err != nil {
+		logrus.Errorf("Get current directory err:%v", err)
+	}
+	logrus.Info("Current location is %s", pwd)
+	pivotRoot(pwd)
+
+	defaultMountFlags := syscall.MS_NOEXEC | syscall.MS_NODEV | syscall.MS_NOSUID
+	//proc 是一个虚拟文件系统，提供了关于系统内核状态和进程信息的接口
+	syscall.Mount("proc", "/proc", "proc", uintptr(defaultMountFlags), "")
+
+	//tmpfs 是一个内存文件系统，用于临时存储数据
+	syscall.Mount("tmpfs", "/dev", "tmpfs", syscall.MS_NOSUID|syscall.MS_STRICTATIME, "mode=755")
+
+}
 
 // NewParentProcess 构建 command 用于启动一个新进程
 /*
@@ -16,7 +37,7 @@ import (
 3.下面的clone参数就是去fork出来一个新进程，并且使用了namespace隔离新创建的进程和外部环境。
 4.如果用户指定了-it参数，就需要把当前进程的输入输出导入到标准输入输出上
 */
-func NewParentProcess(tty bool) (*exec.Cmd, *os.File) {
+func NewParentProcess(tty bool, volume string) (*exec.Cmd, *os.File) {
 	// 创建匿名管道用于传递参数，将readPipe作为子进程的ExtraFiles，子进程从readPipe中读取参数
 	// 父进程中则通过writePipe将参数写入管道
 	readPipe, writePipe, err := os.Pipe()
@@ -34,31 +55,12 @@ func NewParentProcess(tty bool) (*exec.Cmd, *os.File) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	}
+	//cmd.Dir = "/home/zsy/busybox"
 	cmd.ExtraFiles = []*os.File{readPipe}
-	return cmd, writePipe
-}
-
-func NewParentProcess_(tty bool) (*exec.Cmd, *os.File) {
-	readPipe, writePipe, err := NewPipe()
-	if err != nil {
-		logrus.Errorf("new pipe error %v", err)
-		return nil, nil
-	}
-	//args := []string{"init", command}
-	//创建一个新的exec.Cmd对象，调用当前执行的程序本身，先执行initCommand初始化环境、资源
-	cmd := exec.Command("/proc/self/exe", "init")
-	//系统调用clone参数fork新进程，创建隔离的新容器进程
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
-	}
-	if tty {
-		// 如果启用了tty，设置标准输入输出错误
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
-	// 在这里传入管道读取端的句柄
-	cmd.ExtraFiles = []*os.File{readPipe} // ->带着这个句柄去创建子进程 ->readpipe成为了第四个文件描述符
+	mntURL := "/home/zsy/merged/"
+	rootURL := "/home/zsy/"
+	NewWorkSpace(rootURL, mntURL, volume)
+	cmd.Dir = mntURL
 	return cmd, writePipe
 }
 
@@ -76,8 +78,10 @@ func RunContainerInitProcess() error {
 	// MS_NOEXEC: 阻止在挂载的文件系统上执行任何程序
 	// MS_NODEV: 阻止在挂载的文件系统上访问任何设备文件
 	// MS_NOSUID: 阻止挂载的文件系统上的 SUID 和 SGID 设置
-	defaultMountFlags := syscall.MS_NOEXEC | syscall.MS_NODEV | syscall.MS_NOSUID
-	syscall.Mount("proc", "/proc", "proc", uintptr(defaultMountFlags), "")
+	//defaultMountFlags := syscall.MS_NOEXEC | syscall.MS_NODEV | syscall.MS_NOSUID
+	//syscall.Mount("proc", "/proc", "proc", uintptr(defaultMountFlags), "")
+
+	setUpMount()
 
 	path, err := exec.LookPath(cmdArray[0])
 
@@ -95,10 +99,62 @@ func RunContainerInitProcess() error {
 	return nil
 }
 
-func NewPipe() (*os.File, *os.File, error) {
-	read, write, err := os.Pipe()
-	if err != nil {
-		return nil, nil, err
+/*
+创建新的挂载点：
+首先，创建一个挂载点，通常是在新的根目录下创建一个.pivot_root目录。
+重新挂载根目录：使用syscall.Mount(root, root, "bind", syscall.MS_BIND|syscall.MS_REC, "")命令，
+将当前的根目录挂载到自身。这里的MS_BIND标志表示这是一个绑定挂载（bind mount），
+它允许将一个目录挂载到另一个目录，而MS_REC标志表示递归挂载，即挂载指定目录及其所有子目录。
+分离文件系统：通过将根目录挂载到自身，我们实际上是在创建一个新的挂载点，这个挂载点与原始的根目录在文件系统树上是独立的。
+这意味着，当执行pivot_root时，我们可以将原始的根目录移动到.pivot_root目录下，而不会干扰到新的根目录。
+
+执行pivot_root：此时，执行pivot_root(root, pivotDir)命令，将当前的工作目录切换到新的根目录，并将旧的根目录移动到.pivot_root目录下。
+
+卸载临时目录：一旦pivot_root成功执行，旧的根目录就被移动到了.pivot_root目录下，此时可以卸载这个临时目录
+*/
+func pivotRoot(root string) error {
+	//使当前的root与即将创建的root不在一个文件系统下，将root重新mount(bind mount换一个挂载点挂载)
+	//root -> root递归地应用到子目录
+	if err := syscall.Mount(root, root, "bind", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("mount rootfs to itself error %v", err)
 	}
-	return read, write, nil
+	pivotDir := filepath.Join(root, ".pivot_root")
+	if err := os.Mkdir(pivotDir, constant.Perm0755); err != nil {
+		return err
+	}
+
+	//创建新的文件系统
+	//整个系统切换到root,当前进程的old root文件移动到pivotDir
+	//将当前的工作目录切换到新的根目录，并将旧的根目录移动到.pivot_root目录下。
+	if err := syscall.PivotRoot(root, pivotDir); err != nil {
+		return fmt.Errorf("pivotDir %v", err)
+	}
+
+	//更新当前的工作目录为新的根目录
+	if err := syscall.Chdir("/"); err != nil {
+		return fmt.Errorf("chdir / %v", err)
+	}
+
+	//将之前用于 pivot_root 的临时目录 pivotDir 卸载（取消挂载）
+	pivotDir = filepath.Join("/", ".pivot_root")
+	if err := syscall.Unmount(pivotDir, syscall.MNT_DETACH); err != nil {
+		return fmt.Errorf("unmount pivot_root error %v", err)
+	}
+
+	return os.Remove(pivotDir)
+}
+
+func GenerateContainerID() string {
+	return randStringBytes(IDLength)
+}
+
+/* 获取容器ID */
+func randStringBytes(n int) string {
+	letterBytes := "1234567890"
+	rand.Seed(time.Now().UnixNano())
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = letterBytes[rand.Intn(len(letterBytes))]
+	}
+	return string(b)
 }

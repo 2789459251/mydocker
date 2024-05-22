@@ -8,6 +8,7 @@ import (
 	"myDocker/cgroups/subsystems"
 	"myDocker/container"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -25,6 +26,8 @@ func main() {
 	app.Commands = []cli.Command{
 		initCommand,
 		runCommand,
+		commitCommand,
+		listCommand,
 	}
 
 	//在docker启动之前执行的钩子函数，设置docker日志打印
@@ -39,6 +42,15 @@ func main() {
 	}
 }
 
+var listCommand = cli.Command{
+	Name:  "ps",
+	Usage: "list all the containers",
+	Action: func(c *cli.Context) error {
+		ListContainers()
+		return nil
+	},
+}
+
 var runCommand = cli.Command{
 	Name: "run",
 	Usage: `Create a container with namespace and cgroups limit
@@ -48,6 +60,14 @@ var runCommand = cli.Command{
 			// 简单起见，这里把 -i 和 -t 参数合并成一个
 			Name:  "it",
 			Usage: "enable tty",
+		},
+		cli.StringFlag{
+			Name:  "name",
+			Usage: "container name"},
+		/*后台启动*/
+		cli.BoolFlag{
+			Name:  "d",
+			Usage: "detach container",
 		},
 		cli.StringFlag{
 			Name:  "mem", // 限制进程内存使用量，为了避免和 stress 命令的 -m 参数冲突 这里使用 -mem,到时候可以看下解决冲突的方法
@@ -60,6 +80,10 @@ var runCommand = cli.Command{
 		cli.StringFlag{
 			Name:  "cpuset",
 			Usage: "cpuset limit,e.g.: -cpuset 2,4", // 限制进程 cpu 使用率
+		},
+		cli.StringFlag{
+			Name:  "v",
+			Usage: "volume,e.g.: -v hostpath:containerpath",
 		},
 	},
 	/*
@@ -79,14 +103,20 @@ var runCommand = cli.Command{
 		}
 
 		tty := context.Bool("it")
+		detach := context.Bool("d")
+		containerName := context.String("name")
+		if tty && detach {
+			/*不能同时输出日志并且后态启动*/
+			return fmt.Errorf("it and paramter can not both provided")
+		}
 		resConf := &subsystems.ResourceConfig{
 			MemoryLimit: context.String("mem"),
 			CpuSet:      context.String("cpuset"),
 			CpuCfsQuota: context.Int("cpu"),
 		}
 		log.Info("resConf:", resConf)
-
-		Run(tty, cmdArray, resConf)
+		volume := context.String("v")
+		Run(tty, cmdArray, resConf, volume, containerName)
 		return nil
 	},
 }
@@ -100,15 +130,29 @@ var initCommand = cli.Command{
 	},
 }
 
+var commitCommand = cli.Command{
+	Name:  "commit",
+	Usage: "Commit container process image",
+	Action: func(context *cli.Context) error {
+		if len(context.Args()) < 1 {
+			return fmt.Errorf("missing image name")
+		}
+		imageName := context.Args().Get(0)
+		commitContainer(imageName)
+		return nil
+	},
+}
+
 // Run 执行具体 command
 /*
 	这里的Start方法是真正开始执行由NewParentProcess构建好的command的调用，它首先会clone出来一个namespace隔离的
 进程，然后在子进程中，调用/proc/self/exe,也就是调用自己，发送init参数，调用我们写的init方法，
 去初始化容器的一些资源。
 */
-func Run(tty bool, comArray []string, res *subsystems.ResourceConfig) {
+func Run(tty bool, comArray []string, res *subsystems.ResourceConfig, volume, containerName string) {
+	containerId := container.GenerateContainerID()
 	//新建进程
-	parent, writePipe := container.NewParentProcess(tty)
+	parent, writePipe := container.NewParentProcess(tty, volume)
 	if parent == nil {
 		log.Errorf("New parent process error")
 		return
@@ -116,15 +160,28 @@ func Run(tty bool, comArray []string, res *subsystems.ResourceConfig) {
 	if err := parent.Start(); err != nil {
 		log.Errorf("Run parent.Start err:%v", err)
 	}
+
+	/* 记录容器创建信息 */
+	err := container.RecordContainerInfo(parent.Process.Pid, comArray, containerName, containerId)
+	if err != nil {
+		log.Errorf("Record container info error %v", err)
+		return
+	}
 	// 创建cgroup manager, 并通过调用set和apply设置资源限制并使限制在容器上生效
-	cgroupManager := cgroups.NewCgroupManager("mydocker-cgroup")
+	cgroupManager := cgroups.NewCgroupManager("mydocker2")
 	defer cgroupManager.Destroy()
+	cgroupManager.Resource = res
 	_ = cgroupManager.Set(res)
 	_ = cgroupManager.Apply(parent.Process.Pid)
 
 	// 在子进程创建后才能通过pipe来发送参数
 	sendInitCommand(comArray, writePipe)
-	_ = parent.Wait()
+
+	if tty { // 如果是tty，那么父进程等待，就是前台运行，否则就是跳过，实现后台运行
+		_ = parent.Wait()
+		container.DeleteWorkSpace("/home/zsy/", volume)
+		container.DeleteContainerInfo(containerId)
+	}
 }
 
 // sendInitCommand 通过writePipe将指令发送给子进程
@@ -133,4 +190,13 @@ func sendInitCommand(comArray []string, writePipe *os.File) {
 	log.Infof("command all is %s", command)
 	_, _ = writePipe.WriteString(command)
 	_ = writePipe.Close()
+}
+
+func commitContainer(imageName string) {
+	mntPath := "/home/zsy/merged"
+	imageTar := "/home/zsy/" + imageName + ".tar"
+	fmt.Println("commitCommand imageTar:", imageTar)
+	if _, err := exec.Command("tar", "-czf", imageTar, "-C", mntPath, ".").CombinedOutput(); err != nil {
+		log.Errorf("tar folder %s error %v", mntPath, err)
+	}
 }
