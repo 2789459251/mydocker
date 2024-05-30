@@ -16,6 +16,11 @@ const usage = `mydocker is a simple container runtime implementation.
 			   The purpose of this project is to learn how docker works and how to write a docker by ourselves
 			   Enjoy it, just for fun.`
 
+const (
+	EnvExecPid = "mydocker_pid"
+	EnvExecCmd = "mydocker_cmd"
+)
+
 func main() {
 	//创建一个cli实例
 	app := cli.NewApp()
@@ -28,6 +33,8 @@ func main() {
 		runCommand,
 		commitCommand,
 		listCommand,
+		logCommand,
+		execCommand,
 	}
 
 	//在docker启动之前执行的钩子函数，设置docker日志打印
@@ -40,6 +47,31 @@ func main() {
 	if err := app.Run(os.Args); err != nil {
 		log.Fatal(err)
 	}
+}
+
+/*进入容器*/
+var execCommand = cli.Command{
+	Name:  "exec",
+	Usage: "exec a command into container",
+	Action: func(context *cli.Context) error {
+		// 如果环境变量存在，说明C代码已经运行过了，即setns系统调用已经执行了，这里就直接返回，避免重复执行
+		if os.Getenv(EnvExecPid) != "" {
+			log.Infof("pid callback pid %v", os.Getgid())
+			return nil
+		}
+		// 格式：mydocker exec 容器名字 命令，因此至少会有两个参数
+		if len(context.Args()) < 2 {
+			return fmt.Errorf("missing container name or command")
+		}
+		containerName := context.Args().Get(0)
+		// 将除了容器名之外的参数作为命令部分
+		var commandArray []string
+		for _, arg := range context.Args().Tail() {
+			commandArray = append(commandArray, arg)
+		}
+		ExecContainer(containerName, commandArray)
+		return nil
+	},
 }
 
 var listCommand = cli.Command{
@@ -130,6 +162,7 @@ var initCommand = cli.Command{
 	},
 }
 
+/*打包镜像命令*/
 var commitCommand = cli.Command{
 	Name:  "commit",
 	Usage: "Commit container process image",
@@ -143,6 +176,20 @@ var commitCommand = cli.Command{
 	},
 }
 
+/*获取日志命令*/
+var logCommand = cli.Command{
+	Name:  "logs",
+	Usage: "Show container logs",
+	Action: func(context *cli.Context) error {
+		if len(context.Args()) < 1 {
+			return fmt.Errorf("missing container name")
+		}
+		containerName := context.Args().Get(0)
+		logContainner(containerName)
+		return nil
+	},
+}
+
 // Run 执行具体 command
 /*
 	这里的Start方法是真正开始执行由NewParentProcess构建好的command的调用，它首先会clone出来一个namespace隔离的
@@ -152,7 +199,7 @@ var commitCommand = cli.Command{
 func Run(tty bool, comArray []string, res *subsystems.ResourceConfig, volume, containerName string) {
 	containerId := container.GenerateContainerID()
 	//新建进程
-	parent, writePipe := container.NewParentProcess(tty, volume)
+	parent, writePipe := container.NewParentProcess(tty, volume, containerId)
 	if parent == nil {
 		log.Errorf("New parent process error")
 		return
