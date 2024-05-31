@@ -53,6 +53,7 @@ func RecordContainerInfo(containerPID int, commandArray []string, containerName,
 		return errors.WithMessage(err, "container info marshal failed")
 	}
 	jsonStr := string(jsonBytes)
+	///var/lib/mydocker/containers/config.json
 	// 拼接出存储容器信息文件的路径，如果目录不存在则级联创建
 	dirPath := fmt.Sprintf(InfoLocFormat, containerId)
 	if err := os.MkdirAll(dirPath, constant.Perm0622); err != nil {

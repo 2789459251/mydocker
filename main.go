@@ -35,6 +35,7 @@ func main() {
 		listCommand,
 		logCommand,
 		execCommand,
+		stopCommand,
 	}
 
 	//在docker启动之前执行的钩子函数，设置docker日志打印
@@ -47,6 +48,26 @@ func main() {
 	if err := app.Run(os.Args); err != nil {
 		log.Fatal(err)
 	}
+}
+
+/*停止容器*/
+var stopCommand = cli.Command{
+	Name:  "stop",
+	Usage: "stop container",
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:  "name",
+			Usage: "container name",
+		},
+	},
+	Action: func(c *cli.Context) error {
+		if len(c.Args()) < 1 {
+			return fmt.Errorf("container name is required")
+		}
+		containerName := c.Args().Get(0)
+		stopContainer(containerName)
+		return nil
+	},
 }
 
 /*进入容器*/
