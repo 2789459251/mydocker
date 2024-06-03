@@ -32,10 +32,11 @@ type Info struct {
 	Command     string `json:"command"`    // 容器内init运行命令
 	CreatedTime string `json:"createTime"` // 创建时间
 	Status      string `json:"status"`     // 容器的状态
+	Volume      string `json:"volume"`     // 容器挂载的 volume
 }
 
 /* 记录容器信息 */
-func RecordContainerInfo(containerPID int, commandArray []string, containerName, containerId string) error {
+func RecordContainerInfo(containerPID int, commandArray []string, containerName, containerId, volume string) error {
 	if containerName == "" {
 		containerName = containerId
 	}
@@ -47,6 +48,7 @@ func RecordContainerInfo(containerPID int, commandArray []string, containerName,
 		CreatedTime: time.Now().Format("2006-01-02 15:04:05"),
 		Status:      RUNNING,
 		Name:        containerName,
+		Volume:      volume,
 	}
 	jsonBytes, err := json.Marshal(containerInfo)
 	if err != nil {
@@ -72,11 +74,13 @@ func RecordContainerInfo(containerPID int, commandArray []string, containerName,
 	return nil
 }
 
-func DeleteContainerInfo(containerID string) {
+func DeleteContainerInfo(containerID string) error {
 	dirPath := fmt.Sprintf(InfoLocFormat, containerID)
 	if err := os.RemoveAll(dirPath); err != nil {
 		log.Errorf("Remove dir %s error %v", dirPath, err)
+		return err
 	}
+	return nil
 }
 
 func GetLogPath(setLogPath, containnerId string) string {

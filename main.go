@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 	"myDocker/cgroups"
 	"myDocker/cgroups/subsystems"
 	"myDocker/container"
+	"myDocker/utils"
 	"os"
 	"os/exec"
 	"strings"
@@ -36,6 +38,7 @@ func main() {
 		logCommand,
 		execCommand,
 		stopCommand,
+		removeCommand,
 	}
 
 	//在docker启动之前执行的钩子函数，设置docker日志打印
@@ -48,6 +51,27 @@ func main() {
 	if err := app.Run(os.Args); err != nil {
 		log.Fatal(err)
 	}
+}
+
+/*删除容器*/
+var removeCommand = cli.Command{
+	Name:  "rm",
+	Usage: "remove a container",
+	Flags: []cli.Flag{
+		cli.BoolFlag{
+			Name:  "f",
+			Usage: "force remove the container",
+		},
+	},
+	Action: func(c *cli.Context) error {
+		if len(c.Args()) < 1 {
+			return cli.NewExitError("missing container name", 1)
+		}
+		containerName := c.Args().Get(0)
+		force := c.Bool("f")
+		removeContainer(containerName, force)
+		return nil
+	},
 }
 
 /*停止容器*/
@@ -95,6 +119,7 @@ var execCommand = cli.Command{
 	},
 }
 
+/* ps命令 */
 var listCommand = cli.Command{
 	Name:  "ps",
 	Usage: "list all the containers",
@@ -104,6 +129,7 @@ var listCommand = cli.Command{
 	},
 }
 
+/* 运行指令 */
 var runCommand = cli.Command{
 	Name: "run",
 	Usage: `Create a container with namespace and cgroups limit
@@ -169,10 +195,15 @@ var runCommand = cli.Command{
 		}
 		log.Info("resConf:", resConf)
 		volume := context.String("v")
-		Run(tty, cmdArray, resConf, volume, containerName)
+
+		imageName := cmdArray[0]
+		cmdArray = cmdArray[1:]
+		Run(tty, cmdArray, resConf, volume, containerName, imageName)
 		return nil
 	},
 }
+
+/*初始化命令*/
 var initCommand = cli.Command{
 	Name:  "init",
 	Usage: "Init container process run user's process in container. Do not call it outside",
@@ -188,12 +219,12 @@ var commitCommand = cli.Command{
 	Name:  "commit",
 	Usage: "Commit container process image",
 	Action: func(context *cli.Context) error {
-		if len(context.Args()) < 1 {
-			return fmt.Errorf("missing image name")
+		if len(context.Args()) < 2 {
+			return fmt.Errorf("missing image name and container name")
 		}
-		imageName := context.Args().Get(0)
-		commitContainer(imageName)
-		return nil
+		containerID := context.Args().Get(0)
+		imageName := context.Args().Get(1)
+		return commitContainer(containerID, imageName)
 	},
 }
 
@@ -217,10 +248,10 @@ var logCommand = cli.Command{
 进程，然后在子进程中，调用/proc/self/exe,也就是调用自己，发送init参数，调用我们写的init方法，
 去初始化容器的一些资源。
 */
-func Run(tty bool, comArray []string, res *subsystems.ResourceConfig, volume, containerName string) {
+func Run(tty bool, comArray []string, res *subsystems.ResourceConfig, volume, containerName, imageName string) {
 	containerId := container.GenerateContainerID()
 	//新建进程
-	parent, writePipe := container.NewParentProcess(tty, volume, containerId)
+	parent, writePipe := container.NewParentProcess(tty, volume, containerId, imageName)
 	if parent == nil {
 		log.Errorf("New parent process error")
 		return
@@ -230,13 +261,13 @@ func Run(tty bool, comArray []string, res *subsystems.ResourceConfig, volume, co
 	}
 
 	/* 记录容器创建信息 */
-	err := container.RecordContainerInfo(parent.Process.Pid, comArray, containerName, containerId)
+	err := container.RecordContainerInfo(parent.Process.Pid, comArray, containerName, containerId, volume)
 	if err != nil {
 		log.Errorf("Record container info error %v", err)
 		return
 	}
 	// 创建cgroup manager, 并通过调用set和apply设置资源限制并使限制在容器上生效
-	cgroupManager := cgroups.NewCgroupManager("mydocker2")
+	cgroupManager := cgroups.NewCgroupManager("mydocker-cgroup")
 	defer cgroupManager.Destroy()
 	cgroupManager.Resource = res
 	_ = cgroupManager.Set(res)
@@ -247,7 +278,7 @@ func Run(tty bool, comArray []string, res *subsystems.ResourceConfig, volume, co
 
 	if tty { // 如果是tty，那么父进程等待，就是前台运行，否则就是跳过，实现后台运行
 		_ = parent.Wait()
-		container.DeleteWorkSpace("/home/zsy/", volume)
+		container.DeleteWorkSpace(containerId, volume)
 		container.DeleteContainerInfo(containerId)
 	}
 }
@@ -260,11 +291,25 @@ func sendInitCommand(comArray []string, writePipe *os.File) {
 	_ = writePipe.Close()
 }
 
-func commitContainer(imageName string) {
-	mntPath := "/home/zsy/merged"
-	imageTar := "/home/zsy/" + imageName + ".tar"
-	fmt.Println("commitCommand imageTar:", imageTar)
-	if _, err := exec.Command("tar", "-czf", imageTar, "-C", mntPath, ".").CombinedOutput(); err != nil {
-		log.Errorf("tar folder %s error %v", mntPath, err)
+var ErrImageAlreadyExists = errors.New("Image Already Exists")
+
+/*将容器打包成镜像*/
+func commitContainer(containerId, imageName string) error {
+	//mntPath := "/home/zsy/merged"
+	//imageTar := "/home/zsy/" + imageName + ".tar"
+	mntPath := utils.GetMerged(containerId)
+	imageTar := utils.GetImage(imageName)
+	exists, err := utils.PathExists(imageTar)
+	if err != nil {
+		return errors.WithMessagef(err, "check is image [%s/%s] exist failed", imageName, imageTar)
 	}
+	if exists {
+		return ErrImageAlreadyExists
+	}
+
+	log.Info("commitCommand imageTar:", imageTar)
+	if _, err := exec.Command("tar", "-czf", imageTar, "-C", mntPath, ".").CombinedOutput(); err != nil {
+		return errors.WithMessagef(err, "tar folder %s  failed", mntPath)
+	}
+	return nil
 }
