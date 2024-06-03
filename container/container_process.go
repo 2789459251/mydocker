@@ -38,7 +38,7 @@ func setUpMount() {
 3.下面的clone参数就是去fork出来一个新进程，并且使用了namespace隔离新创建的进程和外部环境。
 4.如果用户指定了-it参数，就需要把当前进程的输入输出导入到标准输入输出上
 */
-func NewParentProcess(tty bool, volume, containnerId, ImageName string) (*exec.Cmd, *os.File) {
+func NewParentProcess(tty bool, volume, containnerId, ImageName string, envSlice []string) (*exec.Cmd, *os.File) {
 	// 创建匿名管道用于传递参数，将readPipe作为子进程的ExtraFiles，子进程从readPipe中读取参数
 	// 父进程中则通过writePipe将参数写入管道
 	readPipe, writePipe, err := os.Pipe()
@@ -76,6 +76,7 @@ func NewParentProcess(tty bool, volume, containnerId, ImageName string) (*exec.C
 	//rootURL := "/home/zsy/"
 	NewWorkSpace(containnerId, ImageName, volume)
 	cmd.Dir = utils.GetMerged(containnerId)
+	cmd.Env = append(os.Environ(), envSlice...)
 	return cmd, writePipe
 }
 

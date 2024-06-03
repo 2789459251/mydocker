@@ -133,7 +133,8 @@ var listCommand = cli.Command{
 var runCommand = cli.Command{
 	Name: "run",
 	Usage: `Create a container with namespace and cgroups limit
-			mydocker run -it [command]`,
+			mydocker run -it [command]
+			mydocker run -d -name [containerName] [imageName] [command]`,
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			// 简单起见，这里把 -i 和 -t 参数合并成一个
@@ -163,6 +164,10 @@ var runCommand = cli.Command{
 		cli.StringFlag{
 			Name:  "v",
 			Usage: "volume,e.g.: -v hostpath:containerpath",
+		},
+		cli.StringSliceFlag{
+			Name:  "e",
+			Usage: "environment variables",
 		},
 	},
 	/*
@@ -198,7 +203,8 @@ var runCommand = cli.Command{
 
 		imageName := cmdArray[0]
 		cmdArray = cmdArray[1:]
-		Run(tty, cmdArray, resConf, volume, containerName, imageName)
+		envSlice := context.StringSlice("e")
+		Run(tty, cmdArray, envSlice, resConf, volume, containerName, imageName)
 		return nil
 	},
 }
@@ -248,10 +254,10 @@ var logCommand = cli.Command{
 进程，然后在子进程中，调用/proc/self/exe,也就是调用自己，发送init参数，调用我们写的init方法，
 去初始化容器的一些资源。
 */
-func Run(tty bool, comArray []string, res *subsystems.ResourceConfig, volume, containerName, imageName string) {
+func Run(tty bool, comArray, envSlice []string, res *subsystems.ResourceConfig, volume, containerName, imageName string) {
 	containerId := container.GenerateContainerID()
 	//新建进程
-	parent, writePipe := container.NewParentProcess(tty, volume, containerId, imageName)
+	parent, writePipe := container.NewParentProcess(tty, volume, containerId, imageName, envSlice)
 	if parent == nil {
 		log.Errorf("New parent process error")
 		return
