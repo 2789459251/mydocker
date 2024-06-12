@@ -8,9 +8,11 @@ import (
 	"myDocker/cgroups"
 	"myDocker/cgroups/subsystems"
 	"myDocker/container"
+	"myDocker/network"
 	"myDocker/utils"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -39,6 +41,7 @@ func main() {
 		execCommand,
 		stopCommand,
 		removeCommand,
+		networkCommand,
 	}
 
 	//在docker启动之前执行的钩子函数，设置docker日志打印
@@ -169,6 +172,14 @@ var runCommand = cli.Command{
 			Name:  "e",
 			Usage: "environment variables",
 		},
+		cli.StringFlag{
+			Name:  "net",
+			Usage: "container network，e.g. -net testbr",
+		},
+		cli.StringSliceFlag{
+			Name:  "p",
+			Usage: "port mapping,e.g. -p 8080:80 -p 30336:3306",
+		},
 	},
 	/*
 		这里是run命令执行的真正函数。
@@ -204,7 +215,9 @@ var runCommand = cli.Command{
 		imageName := cmdArray[0]
 		cmdArray = cmdArray[1:]
 		envSlice := context.StringSlice("e")
-		Run(tty, cmdArray, envSlice, resConf, volume, containerName, imageName)
+		network := context.String("net")
+		portMapping := context.StringSlice("p")
+		Run(tty, cmdArray, envSlice, resConf, volume, containerName, imageName, network, portMapping)
 		return nil
 	},
 }
@@ -248,13 +261,69 @@ var logCommand = cli.Command{
 	},
 }
 
+/*容器网络命令*/
+var networkCommand = cli.Command{
+	Name:  "network",
+	Usage: "container network commands",
+	Subcommands: []cli.Command{
+		{
+			Name:  "create",
+			Usage: "create a container network",
+			Flags: []cli.Flag{
+				cli.StringFlag{
+					Name:  "driver",
+					Usage: "network driver",
+				},
+				cli.StringFlag{
+					Name:  "subnet",
+					Usage: "subnet cidr",
+				},
+			},
+			Action: func(context *cli.Context) error {
+				if len(context.Args()) < 1 {
+					return fmt.Errorf("missing network name")
+				}
+				driver := context.String("driver")
+				subnet := context.String("subnet")
+				name := context.Args()[0]
+				if err := network.CreateNetwork(driver, subnet, name); err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+		{
+			Name:  "list",
+			Usage: "list container network",
+			Action: func(context *cli.Context) error {
+				network.ListNetwork()
+				return nil
+			},
+		},
+		{
+			Name:  "remove",
+			Usage: "remove container network",
+			Action: func(context *cli.Context) error {
+				if len(context.Args()) < 1 {
+					return fmt.Errorf("missing network name")
+				}
+				err := network.DeleteNetwork(context.Args()[0])
+				if err != nil {
+					return fmt.Errorf("remove network error: %+v", err)
+				}
+				return nil
+			},
+		},
+	},
+}
+
 // Run 执行具体 command
 /*
 	这里的Start方法是真正开始执行由NewParentProcess构建好的command的调用，它首先会clone出来一个namespace隔离的
 进程，然后在子进程中，调用/proc/self/exe,也就是调用自己，发送init参数，调用我们写的init方法，
 去初始化容器的一些资源。
 */
-func Run(tty bool, comArray, envSlice []string, res *subsystems.ResourceConfig, volume, containerName, imageName string) {
+func Run(tty bool, comArray, envSlice []string, res *subsystems.ResourceConfig, volume, containerName, imageName, net string, portMapping []string) {
 	containerId := container.GenerateContainerID()
 	//新建进程
 	parent, writePipe := container.NewParentProcess(tty, volume, containerId, imageName, envSlice)
@@ -279,6 +348,18 @@ func Run(tty bool, comArray, envSlice []string, res *subsystems.ResourceConfig, 
 	_ = cgroupManager.Set(res)
 	_ = cgroupManager.Apply(parent.Process.Pid)
 
+	if net != "" {
+		containerInfo := &container.Info{
+			Id:          containerId,
+			Pid:         strconv.Itoa(parent.Process.Pid),
+			Name:        containerName,
+			PortMapping: portMapping,
+		}
+		if err = network.ConnectContain(net, containerInfo); err != nil {
+			log.Errorf("Error Connect Network %v", err)
+			return
+		}
+	}
 	// 在子进程创建后才能通过pipe来发送参数
 	sendInitCommand(comArray, writePipe)
 

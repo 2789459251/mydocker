@@ -3,12 +3,33 @@ package network
 import (
 	"fmt"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
+	"myDocker/constant"
 	"net"
+	"os"
 )
 
 type BridgeNetworkDriver struct{}
 
+/*在 init 方法中进行 driver 注册。*/
+func init() {
+	// 加载网络驱动
+	var bridgeDriver = BridgeNetworkDriver{}
+	drivers[bridgeDriver.Name()] = &bridgeDriver
+
+	// 文件不存在则创建
+	if _, err := os.Stat(defaultNetworkPath); err != nil {
+		if !os.IsNotExist(err) {
+			logrus.Errorf("check %s is exist failed,detail:%v", defaultNetworkPath, err)
+			return
+		}
+		if err = os.MkdirAll(defaultNetworkPath, constant.Perm0644); err != nil {
+			logrus.Errorf("create %s failed,detail:%v", defaultNetworkPath, err)
+			return
+		}
+	}
+}
 func (b *BridgeNetworkDriver) Name() string {
 	return "bridge"
 }
